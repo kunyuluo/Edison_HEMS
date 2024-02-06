@@ -198,8 +198,9 @@ class DefaultValueFiller:
 
             # Fill the strange zero value:
             DefaultValueFiller.fill_zero_value(filled_data)
-            DefaultValueFiller.fill_strange_value(filled_data)
+            # DefaultValueFiller.fill_strange_value(filled_data)
             DefaultValueFiller.fill_nan_value(filled_data)
+            DefaultValueFiller.spike_smoother(filled_data)
 
             new_df[feature] = filled_data
             # new_df.drop(['weekday'], axis=1, inplace=True)
@@ -281,6 +282,26 @@ class DefaultValueFiller:
                     pass
             else:
                 pass
+
+    @staticmethod
+    def spike_smoother(data):
+
+        window_size = 3
+        length = len(data) - window_size + 1
+        bound_var_ratio_threshold = 0.4
+        var_ratio_threshold = 0.5
+
+        for i in range(length):
+            bound_delta = abs(data[i] - data[i + 2]) / data[i]
+            median = (data[i] + data[i + 2]) / 2
+            delta = abs(median - data[i + 1]) / median
+
+            if bound_delta <= bound_var_ratio_threshold:
+                if delta > var_ratio_threshold:
+                    data[i + 1] = median
+            else:
+                if data[i+1] > data[i] and data[i+1] > data[i+2]:
+                    data[i + 1] = median
 
     def calc_default_value(self, column_name):
         """
@@ -413,6 +434,7 @@ class DataProcessor:
                  hour_range: tuple = None,
                  group_freq: int = None,
                  test_size: float = 0.2,
+                 val_size: float = 0.05,
                  n_input: int = 5,
                  n_output: int = 5,
                  time_zone_transfer: bool = False,
@@ -440,24 +462,34 @@ class DataProcessor:
 
         period_data = self.get_period_data()
         self.data = period_data[0]
+
+        self.train_idx = round(len(self.data) * (1 - test_size))
+        if val_size == 0:
+            self.val_idx = len(self.data) - 1
+        else:
+            if val_size < 1:
+                self.val_idx = round(len(self.data) * val_size)
+            else:
+                self.val_idx = len(self.data) - val_size
+
         self.time_feature_names = period_data[1]
 
         num_features = len(feature_names) if len(feature_names) > 0 else data.shape[1] - 1
         self.num_features = num_features + len(self.time_feature_names)
 
-        self.train, self.test = self.get_train_test()
+        self.train, self.test, self.val = self.get_train_test_val()
         self.X_train, self.y_train = self.to_supervised(self.train)
         self.X_test, self.y_test = self.to_supervised(self.test)
 
     def format_date(self):
-        self.df['data_time'] = pd.to_datetime(self.df[self.date_column])
-        df_local = self.df['data_time'].dt.tz_localize(None).dt.floor('min')
+        self.df[self.date_column] = pd.to_datetime(self.df[self.date_column])
+        df_local = self.df[self.date_column].dt.tz_localize(None).dt.floor('min')
 
         return df_local
 
     def transfer_time_zone(self):
-        self.df['data_time'] = pd.to_datetime(self.df[self.date_column])
-        df_utc = self.df['data_time'].dt.tz_localize('UTC')
+        self.df[self.date_column] = pd.to_datetime(self.df[self.date_column])
+        df_utc = self.df[self.date_column].dt.tz_localize('UTC')
         df_local = df_utc.dt.tz_convert(pytz.timezone('US/Eastern')).dt.tz_localize(None).dt.floor('min')
         # self.df['data_time'] = df_local
         # df_utc = df_utc.dt.tz_localize(None)
@@ -565,12 +597,12 @@ class DataProcessor:
 
         return target_period, time_feas
 
-    def get_train_test(self) -> tuple[np.array, np.array]:
+    def get_train_test_val(self) -> tuple[np.array, np.array, np.array]:
         """
         Runs complete ETL
         """
-        train, test = self.split_data()
-        return self.transform(train, test)
+        train, test, val = self.split_data()
+        return self.transform(train, test, val)
 
     def split_data(self):
         """
@@ -578,32 +610,42 @@ class DataProcessor:
         """
 
         if len(self.data) != 0:
-            train_idx = round(len(self.data) * (1 - self.test_size))
-            train = self.data[:train_idx]
-            test = self.data[train_idx:]
+            # train_idx = round(len(self.data) * (1 - self.test_size))
+            train = self.data[:self.train_idx]
+            if self.val_idx == len(self.data) - 1:
+                test = self.data[self.train_idx:]
+                val = None
+            else:
+                test = self.data[self.train_idx: self.val_idx]
+                val = self.data[self.val_idx:]
+            # test = self.data[self.train_idx:]
             # train = np.array(np.split(train, train.shape[0] / self.timestep))
             # test = np.array(np.split(test, test.shape[0] / self.timestep))
-            return train.values, test.values
+            return train.values, test.values, val.values
         else:
             raise Exception('Data set is empty, cannot split.')
 
-    def transform(self, train: np.array, test: np.array):
+    def transform(self, train: np.array, test: np.array, val: np.array):
 
         train_remainder = train.shape[0] % self.n_input
         test_remainder = test.shape[0] % self.n_input
+        val_remainder = val.shape[0] % self.n_input
         # print(train_remainder, test_remainder)
 
-        if train_remainder != 0 and test_remainder != 0:
+        if train_remainder != 0 and test_remainder != 0 and val_remainder != 0:
             # train = train[0: train.shape[0] - train_remainder]
             # test = test[0: test.shape[0] - test_remainder]
             train = train[train_remainder:]
             test = test[test_remainder:]
+            val = val[:-val_remainder]
         elif train_remainder != 0:
             train = train[train_remainder:]
         elif test_remainder != 0:
             test = test[test_remainder:]
+        elif val_remainder != 0:
+            val = val[val_remainder:]
 
-        return self.window_and_reshape(train), self.window_and_reshape(test)
+        return self.window_and_reshape(train), self.window_and_reshape(test), self.window_and_reshape(val)
         # return train, test
 
     def window_and_reshape(self, data) -> np.array:
@@ -640,3 +682,223 @@ class DataProcessor:
                 # move along one time step
                 in_start += 1
         return np.array(X), np.array(y)
+
+
+class PredictAndForecast:
+    """
+    model: tf.keras.Model
+    train: np.array
+    test: np.array
+    Takes a trained model, train, and test datasets and returns predictions
+    of len(test) with same shape.
+    """
+
+    def __init__(self, model, train, test, n_input=5, n_output=5) -> None:
+        train = train.reshape((train.shape[0] * train.shape[1], train.shape[2]))
+        test = test.reshape((test.shape[0] * test.shape[1], test.shape[2]))
+
+        self.model = model
+        self.train = train
+        self.test = test
+        self.n_input = n_input
+        self.n_output = n_output
+        # self.updated_test = self.updated_test()
+        # self.predictions = self.get_predictions()
+
+    def forcast(self, x_input) -> np.array:
+        """
+        Given last weeks actual data, forecasts next weeks' prices.
+        """
+        # Flatten data
+        # data = np.array(history)
+        # data = data.reshape((data.shape[0] * data.shape[1], data.shape[2]))
+
+        # retrieve last observations for input data
+        # x_input = data[-self.n_input:, :]
+        # x_input = x_input.reshape((1, x_input.shape[0], x_input.shape[1]))
+
+        # forecast the next week
+        yhat = self.model.predict(x_input, verbose=0)
+
+        # we only want the vector forecast
+        yhat = yhat[0]
+        return yhat
+
+    def get_predictions(self) -> np.array:
+        """
+        compiles models predictions week by week over entire test set.
+        """
+        # history is a list of flattened test data + last observation from train data
+        test_remainder = self.test.shape[0] % self.n_output
+        if test_remainder != 0:
+            test = self.test[:-test_remainder]
+        else:
+            test = self.test
+
+        history = [x for x in self.train[-self.n_input:, :]]
+        history.extend(test)
+
+        step = round(len(history) / self.n_output)
+        # history = []
+
+        # walk-forward validation
+        predictions = []
+        window_start = 0
+        for i in range(step):
+
+            if window_start <= len(history) - self.n_input - self.n_output:
+                # print('pred no {}, window_start {}'.format(i+1, window_start))
+                x_input = np.array(history[window_start:window_start + self.n_input])
+                x_input = x_input.reshape((1, x_input.shape[0], x_input.shape[1]))
+                yhat_sequence = self.forcast(x_input)
+                # print('pred no {}'.format(i))
+                # store the predictions
+                predictions.append(yhat_sequence)
+
+            window_start += self.n_output
+            # get real observation and add to history for predicting the next week
+            # history.append(self.test[i, :])
+
+        return np.array(predictions)
+
+    def updated_test(self):
+        test_remainder = self.test.shape[0] % self.n_output
+        if test_remainder != 0:
+            test = self.test[:-test_remainder]
+            return test
+        else:
+            return self.test
+
+    def get_sample_prediction(self, index=0):
+
+        test_remainder = self.test.shape[0] % self.n_output
+        if test_remainder != 0:
+            test = self.test[:-test_remainder]
+        else:
+            test = self.test
+
+        history = [x for x in self.train[-self.n_input:, :]]
+        history.extend(test)
+
+        if index < len(test) - self.n_output:
+            index = index
+        else:
+            index = len(test) - self.n_output
+
+        x_input = np.array(history[index:index + self.n_input])
+        x_input = x_input.reshape((1, x_input.shape[0], x_input.shape[1]))
+        # print(x_input)
+        yhat_sequence = self.forcast(x_input)
+        actual = test[index:index + self.n_output, 0]
+
+        return np.array(yhat_sequence), actual
+
+    def walk_forward_validation(self, pred_length, start_point=0):
+        """
+        walk-forward validation for univariate data.
+        """
+        test_remainder = self.test.shape[0] % self.n_output
+        if test_remainder != 0:
+            test = self.test[:-test_remainder]
+        else:
+            test = self.test
+
+        history = [x for x in self.train[-self.n_input:, :]]
+        history.extend(test)
+
+        if start_point < len(test) - pred_length:
+            start_point = start_point
+        else:
+            start_point = len(test) - pred_length
+
+        inputs = np.array(history[start_point:start_point + self.n_input])
+        predictions = []
+        actuals = []
+
+        max_length = len(test) - (start_point + 1) - self.n_output
+
+        if pred_length > max_length:
+            pred_length = max_length
+        else:
+            pred_length = pred_length
+
+        step = round(pred_length / self.n_output)
+
+        for i in range(step):
+            # Prepare the input sequence
+            x_input = inputs[-self.n_input:]
+            # print(x_input)
+            x_input = x_input.reshape((1, x_input.shape[0], x_input.shape[1]))
+
+            # Make prediction
+            yhat_sequence = self.forcast(x_input)
+            for value in yhat_sequence:
+                # print(yhat_sequence)
+                predictions.append(value)
+
+            # Get actual value for the current timestep
+            actual = test[start_point:start_point + self.n_output, 0]
+            for value in actual:
+                # print(actual)
+                actuals.append(value)
+
+            # Update the input sequence
+            x_input_new = test[start_point:start_point + self.n_output, :]
+            # print(x_input_new)
+
+            for j in range(len(yhat_sequence)):
+                # np.put(x_input_new[j], 0, yhat_sequence[j])
+                x_input_new[j, 0] = yhat_sequence[j]
+
+            inputs = np.append(inputs, x_input_new, axis=0)
+
+            start_point += self.n_output
+
+        return np.array(predictions).reshape(-1, 1), np.array(actuals).reshape(-1, 1)
+
+
+class Evaluate:
+    def __init__(self, actual, predictions) -> None:
+        if actual.shape[1] > 1:
+            actual_values = actual[:, 0]
+        else:
+            actual_values = actual
+
+        self.actual = actual_values
+        self.predictions = predictions
+        self.var_ratio = self.compare_var()
+        self.mape = self.evaluate_model_with_mape()
+
+    def compare_var(self) -> float:
+        """
+        Calculates the variance ratio of the predictions
+        """
+        # print(np.var(self.predictions))
+        # print(np.var(self.actual))
+        return abs(1 - (np.var(self.predictions)) / np.var(self.actual))
+
+    def evaluate_model_with_mape(self) -> float:
+        """
+        Calculates the mean absolute percentage error
+        """
+        return mean_absolute_percentage_error(self.actual.flatten(), self.predictions.flatten())
+
+
+def inverse_transform_prediction(values, feature_num: int, scaler):
+    values = values.flatten()
+
+    dim = values.shape[0]
+    dummy_array = np.zeros([dim, feature_num])
+    for i in range(dim):
+        np.put(dummy_array[i], 0, values[i])
+
+    unscaled = scaler.inverse_transform(dummy_array)
+    unscaled = unscaled[:, 0]
+    unscaled = unscaled.reshape((unscaled.shape[0], 1))
+
+    return unscaled
+
+
+def scale_data(value, value_range=(0, 1), scaled_range=(0, 1)):
+    ratio = (value - value_range[0]) / (value_range[1] - value_range[0])
+    return ratio * (scaled_range[1] - scaled_range[0]) + scaled_range[0]
