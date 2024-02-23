@@ -8,6 +8,9 @@ import matplotlib.dates as mdates
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.preprocessing import MinMaxScaler
 from Time_Features import TimeCovariates
+from darts import concatenate
+from darts import TimeSeries
+from darts.models import TiDEModel
 
 
 class DefaultValueFiller:
@@ -184,21 +187,31 @@ class DefaultValueFiller:
                 for date in datetimes:
                     value = self.feature_data[(self.feature_data[self.datetime_column] == date)][feature].values
 
-                    if len(value) == 0:
+                    if len(value) == 0 or np.isnan(value[0]):
                         current_year = date.year
                         current_month = date.month
                         weekday = date.weekday()
-                        if weekday in [0, 1, 2, 3, 4]:
-                            value = default[current_year][current_month][0][date.hour][date.minute]
-                        elif weekday in [5, 6]:
-                            value = default[current_year][current_month][1][date.hour][date.minute]
+
+                        if min_interval is not None:
+                            min_index = int(date.minute / min_interval)
+                            if weekday in [0, 1, 2, 3, 4]:
+                                value = default[current_year][current_month][0][date.hour][min_index]
+
+                            elif weekday in [5, 6]:
+                                value = default[current_year][current_month][1][date.hour][min_index]
+                        else:
+                            if hr_interval is not None:
+                                if weekday in [0, 1, 2, 3, 4]:
+                                    value = default[current_year][current_month][0][date.hour][0]
+                                elif weekday in [5, 6]:
+                                    value = default[current_year][current_month][1][date.hour][0]
+
                         filled_data.append(value)
                     else:
                         filled_data.append(value[0])
 
             # Fill the strange zero value:
-            DefaultValueFiller.fill_zero_value(filled_data)
-            # DefaultValueFiller.fill_strange_value(filled_data)
+            # DefaultValueFiller.fill_zero_value(filled_data)
             DefaultValueFiller.fill_nan_value(filled_data)
             DefaultValueFiller.spike_smoother(filled_data)
 
@@ -227,31 +240,32 @@ class DefaultValueFiller:
         # Find position (index) of all nan value in the list
         nan_position = [i for i, x in enumerate(data) if math.isnan(x)]
 
-        # Find start and end positions of nan values sequence
-        split_start_idx = []
-        split_end_idx = []
-        split_start_idx.append(nan_position[0])
+        if len(nan_position) != 0:
+            # Find start and end positions of nan values sequence
+            split_start_idx = []
+            split_end_idx = []
+            split_start_idx.append(nan_position[0])
 
-        for i in range(1, len(nan_position)):
-            if nan_position[i] - nan_position[i - 1] == 1:
-                pass
-            else:
-                split_start_idx.append(nan_position[i])
-                split_end_idx.append(nan_position[i - 1])
+            for i in range(1, len(nan_position)):
+                if nan_position[i] - nan_position[i - 1] == 1:
+                    pass
+                else:
+                    split_start_idx.append(nan_position[i])
+                    split_end_idx.append(nan_position[i - 1])
 
-        split_end_idx.append(nan_position[-1])
+            split_end_idx.append(nan_position[-1])
 
-        # Apply linear interpolation for missed values
-        for i in range(len(split_start_idx)):
-            missing_len = split_end_idx[i] - split_start_idx[i] + 1
+            # Apply linear interpolation for missed values
+            for i in range(len(split_start_idx)):
+                missing_len = split_end_idx[i] - split_start_idx[i] + 1
 
-            low = data[split_start_idx[i] - 1] if split_start_idx[i] != 0 else 0
-            high = data[split_end_idx[i] + 1] if split_end_idx[i] != len(data) - 1 else data[split_end_idx[i] - 1]
+                low = data[split_start_idx[i] - 1] if split_start_idx[i] != 0 else 0
+                high = data[split_end_idx[i] + 1] if split_end_idx[i] != len(data) - 1 else data[split_end_idx[i] - 1]
 
-            data[split_start_idx[i]:split_end_idx[i] + 1] = (interpolation(low, high, missing_len))
+                data[split_start_idx[i]:split_end_idx[i] + 1] = (interpolation(low, high, missing_len))
 
-        if not inplace:
-            return data
+            if not inplace:
+                return data
 
     @staticmethod
     def fill_zero_value(data):
@@ -292,7 +306,7 @@ class DefaultValueFiller:
         var_ratio_threshold = 0.5
 
         for i in range(length):
-            bound_delta = abs(data[i] - data[i + 2]) / data[i]
+            bound_delta = abs(data[i] - data[i + 2]) / data[i] if data[i] != 0 else 9999
             median = (data[i] + data[i + 2]) / 2
             delta = abs(median - data[i + 1]) / median
 
@@ -300,7 +314,7 @@ class DefaultValueFiller:
                 if delta > var_ratio_threshold:
                     data[i + 1] = median
             else:
-                if data[i+1] > data[i] and data[i+1] > data[i+2]:
+                if data[i + 1] > data[i] and data[i + 1] > data[i + 2]:
                     data[i + 1] = median
 
     def calc_default_value(self, column_name):
@@ -308,38 +322,72 @@ class DefaultValueFiller:
             Calculate average value of every minute in a day by weekday (from Monday to Sunday).
             Use the calculated value to fill empty/missing value in the dataset.
         """
-        hours = range(24)
-        minutes = range(60)
+        hr_interval = None
+        min_interval = None
+        if 'min' in self.freq:
+            min_interval = int(self.freq.split('min')[0])
+        elif 'h' in self.freq:
+            hr_interval = int(self.freq.split('h')[0])
+        else:
+            pass
+
+        # hours = range(24)
+        # minutes = range(60)
         default_values = {}
 
         weekdays = {}
         weekends = {}
 
-        for hour in hours:
-            hours_wday = []
-            hours_wend = []
-            for minute in minutes:
-                value_wday = self.feature_data[
-                    ((self.feature_data['weekday'] == 0) |
-                     (self.feature_data['weekday'] == 1) |
-                     (self.feature_data['weekday'] == 2) |
-                     (self.feature_data['weekday'] == 3) |
-                     (self.feature_data['weekday'] == 4)) &
-                    (self.feature_data[self.datetime_column].dt.hour == hour) &
-                    (self.feature_data[self.datetime_column].dt.minute == minute)][column_name].mean()
+        if min_interval is not None:
+            for hour in range(24):
+                hours_wday = []
+                hours_wend = []
+                for minute in range(0, 60, min_interval):
+                    value_wday = self.feature_data[
+                        ((self.feature_data['weekday'] == 0) |
+                         (self.feature_data['weekday'] == 1) |
+                         (self.feature_data['weekday'] == 2) |
+                         (self.feature_data['weekday'] == 3) |
+                         (self.feature_data['weekday'] == 4)) &
+                        (self.feature_data[self.datetime_column].dt.hour == hour) &
+                        (self.feature_data[self.datetime_column].dt.minute == minute)][column_name].mean()
 
-                value_wend = self.feature_data[
-                    ((self.feature_data['weekday'] == 5) |
-                     (self.feature_data['weekday'] == 6)) &
-                    (self.feature_data[self.datetime_column].dt.hour == hour) &
-                    (self.feature_data[self.datetime_column].dt.minute == minute)][
-                    column_name].mean()
+                    value_wend = self.feature_data[
+                        ((self.feature_data['weekday'] == 5) |
+                         (self.feature_data['weekday'] == 6)) &
+                        (self.feature_data[self.datetime_column].dt.hour == hour) &
+                        (self.feature_data[self.datetime_column].dt.minute == minute)][
+                        column_name].mean()
 
-                hours_wday.append(value_wday)
-                hours_wend.append(value_wend)
+                    hours_wday.append(value_wday)
+                    hours_wend.append(value_wend)
 
-            weekdays[hour] = hours_wday
-            weekends[hour] = hours_wend
+                weekdays[hour] = hours_wday
+                weekends[hour] = hours_wend
+        else:
+            if hr_interval is not None:
+                for hour in range(0, 24, hr_interval):
+                    hours_wday = []
+                    hours_wend = []
+
+                    value_wday = self.feature_data[
+                        ((self.feature_data['weekday'] == 0) |
+                         (self.feature_data['weekday'] == 1) |
+                         (self.feature_data['weekday'] == 2) |
+                         (self.feature_data['weekday'] == 3) |
+                         (self.feature_data['weekday'] == 4)) &
+                        (self.feature_data[self.datetime_column].dt.hour == hour)][column_name].mean()
+
+                    value_wend = self.feature_data[
+                        ((self.feature_data['weekday'] == 5) |
+                         (self.feature_data['weekday'] == 6)) &
+                        (self.feature_data[self.datetime_column].dt.hour == hour)][column_name].mean()
+
+                    hours_wday.append(value_wday)
+                    hours_wend.append(value_wend)
+
+                    weekdays[hour] = hours_wday
+                    weekends[hour] = hours_wend
 
         default_values[0] = weekdays
         default_values[1] = weekends
@@ -353,8 +401,17 @@ class DefaultValueFiller:
         """
         days_threshold = 3
 
-        hours = range(24)
-        minutes = range(60)
+        hr_interval = None
+        min_interval = None
+        if 'min' in self.freq:
+            min_interval = int(self.freq.split('min')[0])
+        elif 'h' in self.freq:
+            hr_interval = int(self.freq.split('h')[0])
+        else:
+            pass
+
+        # hours = range(24)
+        # minutes = range(60)
         default_values = {}
 
         data = self.get_feature_data()
@@ -374,46 +431,74 @@ class DefaultValueFiller:
                 weekdays = {}
                 weekends = {}
                 month_values = {}
-                for hour in hours:
-                    hours_wday = []
-                    hours_wend = []
-                    for minute in minutes:
 
-                        # If number of days in this month is not enough (less than threshold) to
-                        # calculate monthly average, then use the previous month to do calculation.
-                        current_year = year
-                        current_month = month
-                        if days_of_last_month < days_threshold:
-                            if month == 1:
-                                current_year = year - 1
-                                current_month = 12
-                            else:
-                                current_month = month - 1
-                        else:
-                            pass
+                # If number of days in this month is not enough (less than threshold) to
+                # calculate monthly average, then use the previous month to do calculation.
+                current_year = year
+                current_month = month
+                if days_of_last_month < days_threshold:
+                    if month == 1:
+                        current_year = year - 1
+                        current_month = 12
+                    else:
+                        current_month = month - 1
+                else:
+                    pass
 
-                        value_wday = data[(data[self.datetime_column].dt.year == current_year) &
-                                          (data[self.datetime_column].dt.month == current_month) &
-                                          ((data[self.datetime_column].dt.weekday == 0) |
-                                           (data[self.datetime_column].dt.weekday == 1) |
-                                           (data[self.datetime_column].dt.weekday == 2) |
-                                           (data[self.datetime_column].dt.weekday == 3) |
-                                           (data[self.datetime_column].dt.weekday == 4)) &
-                                          (data[self.datetime_column].dt.hour == hour) &
-                                          (data[self.datetime_column].dt.minute == minute)][column_name].mean()
+                if min_interval is not None:
+                    for hour in range(24):
+                        hours_wday = []
+                        hours_wend = []
+                        for minute in range(0, 60, min_interval):
+                            value_wday = data[(data[self.datetime_column].dt.year == current_year) &
+                                              (data[self.datetime_column].dt.month == current_month) &
+                                              ((data[self.datetime_column].dt.weekday == 0) |
+                                               (data[self.datetime_column].dt.weekday == 1) |
+                                               (data[self.datetime_column].dt.weekday == 2) |
+                                               (data[self.datetime_column].dt.weekday == 3) |
+                                               (data[self.datetime_column].dt.weekday == 4)) &
+                                              (data[self.datetime_column].dt.hour == hour) &
+                                              (data[self.datetime_column].dt.minute == minute)][column_name].mean()
 
-                        value_wend = data[(data[self.datetime_column].dt.year == current_year) &
-                                          (data[self.datetime_column].dt.month == current_month) &
-                                          ((data[self.datetime_column].dt.weekday == 5) |
-                                           (data[self.datetime_column].dt.weekday == 6)) &
-                                          (data[self.datetime_column].dt.hour == hour) &
-                                          (data[self.datetime_column].dt.minute == minute)][column_name].mean()
+                            value_wend = data[(data[self.datetime_column].dt.year == current_year) &
+                                              (data[self.datetime_column].dt.month == current_month) &
+                                              ((data[self.datetime_column].dt.weekday == 5) |
+                                               (data[self.datetime_column].dt.weekday == 6)) &
+                                              (data[self.datetime_column].dt.hour == hour) &
+                                              (data[self.datetime_column].dt.minute == minute)][column_name].mean()
 
-                        hours_wday.append(value_wday)
-                        hours_wend.append(value_wend)
+                            hours_wday.append(value_wday)
+                            hours_wend.append(value_wend)
 
-                    weekdays[hour] = hours_wday
-                    weekends[hour] = hours_wend
+                        weekdays[hour] = hours_wday
+                        weekends[hour] = hours_wend
+
+                else:
+                    if hr_interval is not None:
+                        for hour in range(0, 24, hr_interval):
+                            hours_wday = []
+                            hours_wend = []
+
+                            value_wday = data[(data[self.datetime_column].dt.year == current_year) &
+                                              (data[self.datetime_column].dt.month == current_month) &
+                                              ((data[self.datetime_column].dt.weekday == 0) |
+                                               (data[self.datetime_column].dt.weekday == 1) |
+                                               (data[self.datetime_column].dt.weekday == 2) |
+                                               (data[self.datetime_column].dt.weekday == 3) |
+                                               (data[self.datetime_column].dt.weekday == 4)) &
+                                              (data[self.datetime_column].dt.hour == hour)][column_name].mean()
+
+                            value_wend = data[(data[self.datetime_column].dt.year == current_year) &
+                                              (data[self.datetime_column].dt.month == current_month) &
+                                              ((data[self.datetime_column].dt.weekday == 5) |
+                                               (data[self.datetime_column].dt.weekday == 6)) &
+                                              (data[self.datetime_column].dt.hour == hour)][column_name].mean()
+
+                            hours_wday.append(value_wday)
+                            hours_wend.append(value_wend)
+
+                            weekdays[hour] = hours_wday
+                            weekends[hour] = hours_wend
 
                 month_values[0] = weekdays
                 month_values[1] = weekends
@@ -514,14 +599,6 @@ class DataProcessor:
                 end_month is not None and
                 start_day is not None and
                 end_day is not None):
-            # df_selected = df[
-            #     (df[self.date_column].dt.year >= start_year) &
-            #     (df[self.date_column].dt.year <= end_year) &
-            #     (df[self.date_column].dt.month >= start_month) &
-            #     (df[self.date_column].dt.month <= end_month) &
-            #     (df[self.date_column].dt.day >= start_day) &
-            #     (df[self.date_column].dt.day <= end_day)]
-
             start = pd.to_datetime(dt.datetime(start_year, start_month, start_day))
             end = pd.to_datetime(dt.datetime(end_year, end_month, end_day))
 
@@ -602,51 +679,51 @@ class DataProcessor:
         Runs complete ETL
         """
         train, test, val = self.split_data()
+        # return train, test, val
         return self.transform(train, test, val)
 
     def split_data(self):
         """
         Split data into train and test sets.
         """
-
+        # print(len(self.data))
+        # print(self.train_idx)
+        # print(self.val_idx)
         if len(self.data) != 0:
             # train_idx = round(len(self.data) * (1 - self.test_size))
             train = self.data[:self.train_idx]
             if self.val_idx == len(self.data) - 1:
                 test = self.data[self.train_idx:]
                 val = None
+                return train.values, test.values, val
             else:
                 test = self.data[self.train_idx: self.val_idx]
                 val = self.data[self.val_idx:]
-            # test = self.data[self.train_idx:]
-            # train = np.array(np.split(train, train.shape[0] / self.timestep))
-            # test = np.array(np.split(test, test.shape[0] / self.timestep))
-            return train.values, test.values, val.values
+                return train.values, test.values, val.values
         else:
             raise Exception('Data set is empty, cannot split.')
 
-    def transform(self, train: np.array, test: np.array, val: np.array):
+    def transform(self, train: np.array, test: np.array, val):
 
-        train_remainder = train.shape[0] % self.n_input
-        test_remainder = test.shape[0] % self.n_input
-        val_remainder = val.shape[0] % self.n_input
-        # print(train_remainder, test_remainder)
+        train_remainder = train.shape[0] % self.n_input if train is not None else None
+        test_remainder = test.shape[0] % self.n_input if test is not None else None
+        val_remainder = val.shape[0] % self.n_input if val is not None else None
+        # print(train_remainder, test_remainder, val_remainder)
 
-        if train_remainder != 0 and test_remainder != 0 and val_remainder != 0:
-            # train = train[0: train.shape[0] - train_remainder]
-            # test = test[0: test.shape[0] - test_remainder]
-            train = train[train_remainder:]
-            test = test[test_remainder:]
-            val = val[:-val_remainder]
-        elif train_remainder != 0:
-            train = train[train_remainder:]
-        elif test_remainder != 0:
-            test = test[test_remainder:]
-        elif val_remainder != 0:
-            val = val[val_remainder:]
+        sets = [train, test, val]
+        for i, remainder in enumerate([train_remainder, test_remainder, val_remainder]):
+            if remainder is not None and remainder != 0:
+                match i:
+                    case 0:
+                        sets[i] = sets[i][remainder:]
+                    case 1:
+                        sets[i] = sets[i][remainder:]
+                    case 2:
+                        sets[i] = sets[i][:-remainder]
 
-        return self.window_and_reshape(train), self.window_and_reshape(test), self.window_and_reshape(val)
-        # return train, test
+        return self.window_and_reshape(sets[0]), self.window_and_reshape(sets[1]), self.window_and_reshape(sets[2])
+        # return train, test, val
+        # return sets[0], sets[1], sets[2]
 
     def window_and_reshape(self, data) -> np.array:
         """
@@ -654,9 +731,12 @@ class DataProcessor:
         namely, [# samples, timestep, # feautures]
         samples
         """
-        samples = int(data.shape[0] / self.n_input)
-        result = np.array(np.array_split(data, samples))
-        return result.reshape((samples, self.n_input, self.num_features))
+        if data is not None:
+            samples = int(data.shape[0] / self.n_input)
+            result = np.array(np.array_split(data, samples))
+            return result.reshape((samples, self.n_input, self.num_features))
+        else:
+            return None
 
     def to_supervised(self, data) -> tuple:
         """
@@ -682,6 +762,262 @@ class DataProcessor:
                 # move along one time step
                 in_start += 1
         return np.array(X), np.array(y)
+
+
+class DataPreprocessorTiDE:
+    def __init__(self,
+                 file_path: str,
+                 df: pd.DataFrame = None,
+                 target_names=None,
+                 dynamic_cov_names=None,
+                 static_cov_names=None,
+                 start_date: tuple = None,
+                 end_date: tuple = None,
+                 hour_range: tuple = None,
+                 group_freq: int = None,
+                 test_size: float = 0.2,
+                 val_size: float = 0.05,
+                 time_zone_transfer: bool = False,
+                 date_column: str = 'data_time',
+                 add_time_features: bool = False,
+                 scaler=None):
+
+        target_names = [] if target_names is None else target_names
+        dynamic_cov_names = [] if dynamic_cov_names is None else dynamic_cov_names
+        # if dynamic_cov_names is None:
+        #     dynamic_cov_names = []
+        # else:
+        #     if add_time_features:
+        #         dynamic_cov_names = dynamic_cov_names +
+        static_cov_names = [] if static_cov_names is None else static_cov_names
+
+        data = df if df is not None else pd.read_csv(file_path, low_memory=False)
+
+        self.df = data
+        self.target_names = target_names
+        self.dynamic_cov_names = dynamic_cov_names
+        self.static_cov_names = static_cov_names
+        self.start_date = start_date
+        self.end_date = end_date
+        self.hour_range = hour_range
+        self.group_freq = group_freq
+        self.time_zone_transfer = time_zone_transfer
+        self.date_column = date_column
+        self.add_time_features = add_time_features
+        self.scaler = scaler
+        self.all_features = target_names + dynamic_cov_names + static_cov_names
+
+        period_data = self.get_period_data()
+        self.data = period_data[0]
+
+        self.train_idx = round(len(self.data) * (1 - test_size))
+        if val_size == 0:
+            self.val_idx = len(self.data) - 1
+        else:
+            if val_size < 1:
+                self.val_idx = round(len(self.data) * val_size)
+            else:
+                self.val_idx = len(self.data) - val_size
+
+        self.time_feature_names = period_data[1]
+        # self.train, self.test = self.get_train_test()
+
+    def format_date(self):
+        self.df[self.date_column] = pd.to_datetime(self.df[self.date_column])
+        df_local = self.df[self.date_column].dt.tz_localize(None).dt.floor('min')
+
+        return df_local
+
+    def transfer_time_zone(self):
+        self.df[self.date_column] = pd.to_datetime(self.df[self.date_column])
+        df_utc = self.df[self.date_column].dt.tz_localize('UTC')
+        df_local = df_utc.dt.tz_convert(pytz.timezone('US/Eastern')).dt.tz_localize(None).dt.floor('min')
+        # self.df['data_time'] = df_local
+        # df_utc = df_utc.dt.tz_localize(None)
+
+        return df_local
+
+    def select_by_date(
+            self,
+            df: pd.DataFrame,
+            start_year: int = dt.date.today().year,
+            end_year: int = dt.date.today().year,
+            start_month: int = None,
+            start_day: int = None,
+            end_month: int = None,
+            end_day: int = None):
+
+        # year = dt.date.today().year
+        # date_start = dt.date(year, start_month, start_day)
+        # date_end = dt.date(year, end_month, end_day)
+        # days = (date_end - date_start).days + 1
+        if (start_month is not None and
+                end_month is not None and
+                start_day is not None and
+                end_day is not None):
+            start = pd.to_datetime(dt.datetime(start_year, start_month, start_day))
+            end = pd.to_datetime(dt.datetime(end_year, end_month, end_day))
+
+            df_selected = df[(df[self.date_column] >= start) & (df[self.date_column] < end)]
+
+            # df_selected.set_index('data_time', inplace=True)
+
+            return df_selected
+
+    def select_by_time(self, df: pd.DataFrame, start_hour: int = 8, end_hour: int = 22):
+        df_selected = df[
+            (df[self.date_column].dt.hour >= start_hour) &
+            (df[self.date_column].dt.hour < end_hour)]
+
+        return df_selected
+
+    def get_period_data(self):
+        # Time zone transfer from UTC to local ('US/Eastern)
+        # *******************************************************************************
+        if self.time_zone_transfer:
+            date_local = self.transfer_time_zone()
+        else:
+            date_local = self.format_date()
+        # print(date_local)
+        # Get data from specific column
+        # *******************************************************************************
+        if len(self.all_features) != 0:
+            target_data = pd.concat([date_local, self.df[self.all_features]], axis=1)
+        else:
+            feature_df = self.df.drop([self.date_column], axis=1)
+            target_data = pd.concat([date_local, feature_df], axis=1)
+
+        # Get data for specified period
+        # *******************************************************************************
+        if self.start_date is not None and len(self.start_date) == 3:
+            target_period = self.select_by_date(
+                target_data, start_year=self.start_date[0], end_year=self.end_date[0],
+                start_month=self.start_date[1], start_day=self.start_date[2],
+                end_month=self.end_date[1], end_day=self.end_date[2])
+        else:
+            target_period = target_data
+
+        if self.hour_range is not None:
+            target_period = self.select_by_time(target_period, self.hour_range[0], self.hour_range[1])
+        else:
+            target_period = target_period
+
+        target_period.set_index(self.date_column, inplace=True)
+
+        if self.group_freq is not None:
+            target_period = target_period.groupby(pd.Grouper(freq=f'{self.group_freq}min')).mean()
+
+        target_period = target_period.dropna()
+        # target_period = target_period.reset_index()
+        # print(target_period)
+
+        if self.scaler is not None:
+            index = target_period.index
+            column_names = target_period.columns
+            target_period = self.scaler.fit_transform(target_period)
+            target_period = pd.DataFrame(target_period, index=index, columns=column_names)
+
+        time_feas = []
+
+        # Add time features as dynamic covariates if needed:
+        if self.add_time_features:
+            dti = target_period.index
+            time_covs = TimeCovariates(dti)
+            time_features = time_covs.get_covariates()
+            target_period = pd.concat([target_period, time_features], axis=1)
+
+            time_feas = time_covs.get_feature_names()
+
+        return target_period, time_feas
+
+    def split_data(self):
+        """
+        Split data into train, test, and validation sets.
+        """
+        if len(self.data) != 0:
+            train = self.data[:self.train_idx]
+            if self.val_idx == len(self.data) - 1:
+                test = self.data[self.train_idx:]
+                val = None
+            else:
+                test = self.data[self.train_idx: self.val_idx]
+                val = self.data[self.val_idx:]
+
+            return train, test, val
+        else:
+            raise Exception('Data set is empty, cannot split.')
+
+    def train_series(self):
+
+        train, test, val = self.split_data()
+
+        past_cov_names = self.dynamic_cov_names + self.time_feature_names
+
+        train_target = TimeSeries.from_dataframe(
+            train[self.target_names], freq=f'{self.group_freq}min')
+        train_past_covs = TimeSeries.from_dataframe(
+            train[past_cov_names], freq=f'{self.group_freq}min')
+
+        return train_target, train_past_covs
+
+    def test_series(self):
+        # data = self.get_period_data()
+        train, test, val = self.split_data()
+
+        past_cov_names = self.dynamic_cov_names + self.time_feature_names
+
+        test_target = TimeSeries.from_dataframe(
+            test[self.target_names], freq=f'{self.group_freq}min')
+        test_past_covs = TimeSeries.from_dataframe(
+            test[past_cov_names], freq=f'{self.group_freq}min')
+
+        return test_target, test_past_covs
+
+    def val_series(self):
+        # data = self.get_period_data()
+        train, test, val = self.split_data()
+
+        if val is not None:
+            past_cov_names = self.dynamic_cov_names + self.time_feature_names
+
+            val_target = TimeSeries.from_dataframe(
+                val[self.target_names], freq=f'{self.group_freq}min')
+            val_past_covs = TimeSeries.from_dataframe(
+                val[past_cov_names], freq=f'{self.group_freq}min')
+        else:
+            val_target = None
+            val_past_covs = None
+
+        return val_target, val_past_covs
+
+    def future_series(self, cov_names, n_extend):
+        """
+        Build future covariates for the given features
+
+        Span of past covariates:
+        with n <= output_chunk_length, at least the same time span as target
+        with n > output_chunk_length, at least the same time span as target plus the next n - output_chunk_length time steps after the end of target
+
+        Span of future covariate:
+        with n <= output_chunk_length, at least the same time span as target plus the next output_chunk_length time steps after the end of target.
+        with n > output_chunk_length, at least the same time span as target plus the next n time steps after the end of target.
+        (source: https://github.com/unit8co/darts/blob/master/docs/userguide/covariates.md)
+        """
+        n_extend = n_extend if n_extend > 24 else 24
+        future_length = n_extend + self.train_idx
+
+        if isinstance(cov_names, str):
+            cov_names = [cov_names]
+            future_covs = self.data[cov_names]
+        elif isinstance(cov_names, list):
+            future_covs = self.data[cov_names]
+        else:
+            raise Exception('Invalid cov_names')
+
+        future_covs = future_covs[:future_length]
+        future_covs = TimeSeries.from_dataframe(future_covs, fill_missing_dates=True)
+
+        return future_covs
 
 
 class PredictAndForecast:
@@ -855,6 +1191,107 @@ class PredictAndForecast:
             start_point += self.n_output
 
         return np.array(predictions).reshape(-1, 1), np.array(actuals).reshape(-1, 1)
+
+
+class PredictAndForecastTiDE:
+    """
+        model: Darts TiDE Model
+        target: TimeSeries of features to be predicted
+        past_covs: TimeSeries of past covariates
+        future_covs: TimeSeries of future covariates
+
+    """
+
+    def __init__(
+            self,
+            model: TiDEModel,
+            input_chunk_length,
+            output_chunk_length,
+            data_loader: DataPreprocessorTiDE,
+            hour_range: tuple = None) -> None:
+
+        self.model = model
+        self.n_input = input_chunk_length
+        self.n_output = output_chunk_length
+        self.data_loader = data_loader
+        self.hour_range = hour_range
+        self.train_target, self.train_past_covs = self.data_loader.train_series()
+        self.test_target, self.test_past_covs = self.data_loader.test_series()
+        self.val_target, self.val_past_covs = self.data_loader.val_series()
+        # self.train, self.test, self.val = self.data_loader.split_data()
+
+    def forcast(self, series=None, past_covs=None, future_covs=None):
+        yhat = self.model.predict(
+            n=self.n_output, series=series, past_covariates=past_covs, future_covariates=future_covs)
+
+        # we only want the vector forecast
+        yhat = yhat.pd_dataframe().values
+        return yhat
+
+    def get_predictions(self):
+
+        train_target, train_past_covs = self.data_loader.test_series()
+        test_target, test_past_covs = self.data_loader.val_series()
+        # val_target, val_past_covs = self.data_loader.val_series()
+
+        test_remainder = len(test_target) % self.n_output
+        if test_remainder != 0:
+            test_target = test_target[:-test_remainder]
+            test_past_covs = test_past_covs[:-test_remainder]
+        else:
+            test_target = test_target
+            test_past_covs = test_past_covs
+
+        # time_index_train = self.train.index
+        time_index_test = test_target.pd_dataframe().index
+
+        history_targets = train_target
+        history_covs = train_past_covs
+
+        step = round(len(test_target) / self.n_output)
+
+        # walk-forward validation
+        predictions = []
+        for i in range(step):
+            yhat_sequence = self.forcast(
+                series=history_targets,
+                past_covs=history_covs)
+
+            start_idx = i * self.n_output
+            end_idx = start_idx + self.n_output
+            history_targets = concatenate(
+                [history_targets, test_target[start_idx:end_idx]], axis=0, ignore_time_axis=True)
+            history_covs = concatenate(
+                [history_covs, test_past_covs[start_idx:end_idx]], axis=0, ignore_time_axis=True)
+
+            # store the predictions
+            predictions.extend(yhat_sequence)
+
+        predictions = pd.DataFrame(predictions, index=time_index_test)
+
+        if self.hour_range is not None:
+            predictions = predictions[
+                (predictions.index.hour >= self.hour_range[0]) &
+                (predictions.index.hour < self.hour_range[1])]
+
+        return predictions
+
+    def updated_test(self):
+        test_target, test_past_covs = self.data_loader.val_series()
+
+        test_remainder = len(test_target) % self.n_output
+        if test_remainder != 0:
+            test_target = test_target[:-test_remainder]
+        else:
+            test_target = test_target
+
+        test = test_target.pd_dataframe()
+        if self.hour_range is not None:
+            test = test[
+                (test.index.hour >= self.hour_range[0]) &
+                (test.index.hour < self.hour_range[1])]
+
+        return test
 
 
 class Evaluate:
