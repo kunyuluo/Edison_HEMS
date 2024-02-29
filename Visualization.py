@@ -95,8 +95,8 @@ class VisualizeData:
 
     @staticmethod
     def plot_metrics(history, epochs: int = 25):
-        acc = history.history['mape']
-        val_acc = history.history['val_mape']
+        acc = history.history['mae']
+        val_acc = history.history['val_mae']
 
         loss = history.history['loss']
         val_loss = history.history['val_loss']

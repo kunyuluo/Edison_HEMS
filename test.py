@@ -7,6 +7,7 @@ from matplotlib import pyplot as plt
 from Helper import DefaultValueFiller, DataProcessor
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from Visualization import VisualizeData
+from Helper import Evaluate
 
 # Load data
 # *******************************************************************************
@@ -38,19 +39,20 @@ features_name = ['vfd_ac_line_power', 'oat', 'zone_rt']
 
 # Prepare the data
 # *************************************************************************
-file_path = 'Data/Edison_Oct2Mar_new_0223.csv'
-n_input, n_output = 48, 48
+# file_path = 'Data/Edison_Oct2Mar_new_0223.csv'
+file_path = 'Data/NewYork_15min.csv'
+n_input, n_output = 36, 48
 time_feature = False
 
 sc = MinMaxScaler(feature_range=(0, 1))
-sc2 = StandardScaler()
+
 data = DataProcessor(
     file_path,
     feature_names=features_name,
     test_size=0.2,
     val_size=144,
-    start_date=(2022, 10, 1),
-    end_date=(2023, 1, 17),
+    # start_date=(2022, 10, 1),
+    # end_date=(2023, 1, 17),
     # hour_range=(7, 20),
     group_freq=30,
     n_input=n_input,
@@ -68,10 +70,14 @@ print(period_data)
 # test = data.test
 # val = data.val
 # print(len(train))
-# print(len(test))
+# print(test)
 # print(len(val))
+# x_train = data.X_train
+# y_train = data.y_train
+# print(x_train.shape)
+# print(y_train.shape)
 
-VisualizeData.plot_variable_no_time(period_data, 'vfd_ac_line_power')
+# VisualizeData.plot_variable_no_time(period_data, 'vfd_ac_line_power')
 # VisualizeData.plot_variable(period_data, 'power_true_zone_W')
 # VisualizeData.check_linearity(period_data, 'power_true_zone_W', 'zone_clsp', True)
 
@@ -112,3 +118,13 @@ VisualizeData.plot_variable_no_time(period_data, 'vfd_ac_line_power')
 # plt.plot(power)
 # plt.show()
 # VisualizeData.plot_variable_no_time(before_filled, 'power_true_zone_W')
+
+# pred = [63, 50, 55]
+# actual = [60, 57, 52]
+# pred = np.array(pred).reshape(-1, 1)
+# actual = np.array(actual).reshape(-1, 1)
+# evals = Evaluate(actual, pred)
+# print(evals.mape())
+# print(evals.smape())
+# print(evals.ope())
+# print(evals.rmse())

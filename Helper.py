@@ -520,6 +520,7 @@ class DataProcessor:
                  group_freq: int = None,
                  test_size: float = 0.2,
                  val_size: float = 0.05,
+                 fixed_val_size: bool = True,
                  n_input: int = 5,
                  n_output: int = 5,
                  time_zone_transfer: bool = False,
@@ -538,6 +539,7 @@ class DataProcessor:
         self.hour_range = hour_range
         self.group_freq = group_freq
         self.test_size = test_size
+        self.fixed_val_size = fixed_val_size
         self.n_input = n_input
         self.n_output = n_output
         self.time_zone_transfer = time_zone_transfer
@@ -705,9 +707,9 @@ class DataProcessor:
 
     def transform(self, train: np.array, test: np.array, val):
 
-        train_remainder = train.shape[0] % self.n_input if train is not None else None
-        test_remainder = test.shape[0] % self.n_input if test is not None else None
-        val_remainder = val.shape[0] % self.n_input if val is not None else None
+        train_remainder = train.shape[0] % self.n_output if train is not None else None
+        test_remainder = test.shape[0] % self.n_output if test is not None else None
+        val_remainder = val.shape[0] % self.n_output if val is not None else None
         # print(train_remainder, test_remainder, val_remainder)
 
         sets = [train, test, val]
@@ -719,11 +721,12 @@ class DataProcessor:
                     case 1:
                         sets[i] = sets[i][remainder:]
                     case 2:
-                        sets[i] = sets[i][:-remainder]
+                        if not self.fixed_val_size:
+                            sets[i] = sets[i][:-remainder]
 
-        return self.window_and_reshape(sets[0]), self.window_and_reshape(sets[1]), self.window_and_reshape(sets[2])
+        # return self.window_and_reshape(sets[0]), self.window_and_reshape(sets[1]), self.window_and_reshape(sets[2])
         # return train, test, val
-        # return sets[0], sets[1], sets[2]
+        return sets[0], sets[1], sets[2]
 
     def window_and_reshape(self, data) -> np.array:
         """
@@ -745,7 +748,8 @@ class DataProcessor:
         Input has to be reshaped to 3D [samples, timesteps, features]
         """
         # flatted the data
-        data_flattened = data.reshape((data.shape[0] * data.shape[1], data.shape[2]))
+        # data_flattened = data.reshape((data.shape[0] * data.shape[1], data.shape[2]))
+        data_flattened = data
         X, y = [], []
         in_start = 0
         # step over the entire history one time step at a time
@@ -1030,8 +1034,8 @@ class PredictAndForecast:
     """
 
     def __init__(self, model, train, test, n_input=5, n_output=5) -> None:
-        train = train.reshape((train.shape[0] * train.shape[1], train.shape[2]))
-        test = test.reshape((test.shape[0] * test.shape[1], test.shape[2]))
+        # train = train.reshape((train.shape[0] * train.shape[1], train.shape[2]))
+        # test = test.reshape((test.shape[0] * test.shape[1], test.shape[2]))
 
         self.model = model
         self.train = train
@@ -1131,16 +1135,18 @@ class PredictAndForecast:
 
     def walk_forward_validation(self, pred_length, start_point=0):
         """
-        walk-forward validation for univariate data.
+        walk-forward validation for multi-variate data.
         """
         test_remainder = self.test.shape[0] % self.n_output
         if test_remainder != 0:
             test = self.test[:-test_remainder]
         else:
             test = self.test
+        # test = self.test
 
         history = [x for x in self.train[-self.n_input:, :]]
         history.extend(test)
+        history = np.array(history)
 
         if start_point < len(test) - pred_length:
             start_point = start_point
@@ -1151,7 +1157,8 @@ class PredictAndForecast:
         predictions = []
         actuals = []
 
-        max_length = len(test) - (start_point + 1) - self.n_output
+        # max_length = len(test) - (start_point + 1) - self.n_output + self.n_input
+        max_length = len(test)
 
         if pred_length > max_length:
             pred_length = max_length
@@ -1160,35 +1167,78 @@ class PredictAndForecast:
 
         step = round(pred_length / self.n_output)
 
+        input_start = 0
+        actual_start = 0
         for i in range(step):
             # Prepare the input sequence
             x_input = inputs[-self.n_input:]
-            # print(x_input)
             x_input = x_input.reshape((1, x_input.shape[0], x_input.shape[1]))
 
             # Make prediction
             yhat_sequence = self.forcast(x_input)
             for value in yhat_sequence:
-                # print(yhat_sequence)
                 predictions.append(value)
 
             # Get actual value for the current timestep
-            actual = test[start_point:start_point + self.n_output, 0]
+            actual = test[actual_start:actual_start + self.n_output, 0]
             for value in actual:
                 # print(actual)
                 actuals.append(value)
 
-            # Update the input sequence
-            x_input_new = test[start_point:start_point + self.n_output, :]
-            # print(x_input_new)
+            actual_start += self.n_output
 
-            for j in range(len(yhat_sequence)):
-                # np.put(x_input_new[j], 0, yhat_sequence[j])
-                x_input_new[j, 0] = yhat_sequence[j]
+            # Update the input sequence
+            input_start += self.n_output
+            input_end = input_start + self.n_input
+            x_input_new = history[input_start:input_end]
+            # print(x_input_new.shape)
+
+            delta = abs(self.n_output - self.n_input)
+            replace_len = self.n_input if self.n_input < self.n_output else self.n_output
+
+            for j in range(replace_len):
+                if self.n_input < self.n_output:
+                    x_input_new[j, 0] = yhat_sequence[j+delta]
+                else:
+                    x_input_new[j+delta, 0] = yhat_sequence[j]
 
             inputs = np.append(inputs, x_input_new, axis=0)
 
-            start_point += self.n_output
+        # for i in range(step):
+        #     # Prepare the input sequence
+        #     x_input = inputs[-self.n_input:]
+        #     # print(x_input)
+        #     x_input = x_input.reshape((1, x_input.shape[0], x_input.shape[1]))
+        #
+        #     # Make prediction
+        #     yhat_sequence = self.forcast(x_input)
+        #     for value in yhat_sequence:
+        #         # print(yhat_sequence)
+        #         predictions.append(value)
+        #
+        #     # Get actual value for the current timestep
+        #     actual = test[start_point:start_point + self.n_output, 0]
+        #     for value in actual:
+        #         # print(actual)
+        #         actuals.append(value)
+        #
+        #     # Update the input sequence
+        #     delta = abs(self.n_output - self.n_input)
+        #     if self.n_input < self.n_output:
+        #         x_input_new = test[start_point + delta:start_point + delta + self.n_input, :]
+        #     else:
+        #         x_input_new = test[start_point:start_point + self.n_input, :]
+        #
+        #     # x_input_new = test[start_point:start_point + self.n_input, :]
+        #     # print(x_input_new)
+        #
+        #     for j in range(self.n_input):
+        #         # np.put(x_input_new[j], 0, yhat_sequence[j])
+        #         x_input_new[j, 0] = yhat_sequence[j]
+        #
+        #     inputs = np.append(inputs, x_input_new, axis=0)
+        #
+        #     start_point += self.n_output
 
         return np.array(predictions).reshape(-1, 1), np.array(actuals).reshape(-1, 1)
 
@@ -1303,8 +1353,8 @@ class Evaluate:
 
         self.actual = actual_values
         self.predictions = predictions
-        self.var_ratio = self.compare_var()
-        self.mape = self.evaluate_model_with_mape()
+        # self.var_ratio = self.compare_var()
+        # self.mape = self.evaluate_model_with_mape()
 
     def compare_var(self) -> float:
         """
@@ -1314,11 +1364,53 @@ class Evaluate:
         # print(np.var(self.actual))
         return abs(1 - (np.var(self.predictions)) / np.var(self.actual))
 
-    def evaluate_model_with_mape(self) -> float:
+    def mape(self) -> float:
         """
         Calculates the mean absolute percentage error
         """
-        return mean_absolute_percentage_error(self.actual.flatten(), self.predictions.flatten())
+        predict_values = self.predictions.flatten()
+        actual_values = self.actual.flatten()
+
+        mape = np.mean(abs((actual_values - predict_values) / actual_values))
+        return mape
+        # return mean_absolute_percentage_error(self.actual.flatten(), self.predictions.flatten())
+
+    def smape(self):
+        """
+        Calculates the symmetric mean absolute percentage error
+        """
+        predict_values = self.predictions.flatten()
+        actual_values = self.actual.flatten()
+
+        smape = 2 * np.mean(np.abs(predict_values - actual_values) / (np.abs(predict_values) + np.abs(actual_values)))
+
+        return smape
+
+    def ope(self):
+        """
+        Calculates the Overall Percentage Error
+        """
+        predict_values = self.predictions.flatten()
+        actual_values = self.actual.flatten()
+        ope = abs((sum(actual_values) - sum(predict_values)) / sum(actual_values))
+        return ope
+
+    def rmse(self):
+        """
+        Calculates the Root Mean Squared Error
+        """
+        predict_values = self.predictions.flatten()
+        actual_values = self.actual.flatten()
+        return np.sqrt(np.mean(np.power(predict_values - actual_values, 2)))
+
+    def cv(self):
+        """
+        Calculates the Coefficient of Variation
+        """
+        predict_values = self.predictions.flatten()
+        actual_values = self.actual.flatten()
+        cv = np.sqrt(np.mean(np.power(predict_values - actual_values, 2))) / np.mean(actual_values)
+        return cv
 
 
 def inverse_transform_prediction(values, feature_num: int, scaler):

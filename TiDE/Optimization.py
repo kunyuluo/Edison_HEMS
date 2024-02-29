@@ -11,9 +11,9 @@ from TiDE import build_tide_1
 
 # Get data from specific column
 # *******************************************************************************
-file_path = '../Data/Edison_Jun2Aug_new.csv'
-target_names = ['power_true_zone_W']
-dynamic_cov_names = ['oat', 'zone_clsp']
+file_path = '../Data/Edison_Oct2Mar_new.csv.csv'
+target_names = ['vfd_ac_line_power']
+dynamic_cov_names = ['oat', 'zone_rt']
 sc = MinMaxScaler(feature_range=(0, 1))
 n_output = 48
 

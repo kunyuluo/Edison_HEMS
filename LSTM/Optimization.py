@@ -17,12 +17,14 @@ n_input, n_output = 48, 48
 # Define objectuve function.
 def objective(trial):
     # select input and output chunk lengths
-    # in_len = trial.suggest_int("in_len", 48, 96, step=12)
+    in_len = trial.suggest_int("in_len", 8, 48, step=4)
     # out_len = trial.suggest_int("out_len", 8, 10)
-    lstm_dim = trial.suggest_int("lstm_dim", 50, 300, step=10)
-    dense_dim = trial.suggest_int("dense_dim", 30, 150, step=10)
-    batch_size = trial.suggest_int("batch_size", 16, 32, step=16)
+    # lstm_dim = trial.suggest_int("lstm_dim", 100, 350, step=10)
+    # dense_dim = trial.suggest_int("dense_dim", 50, 150, step=10)
+    # batch_size = trial.suggest_int("batch_size", 16, 32, step=16)
     # use_time_covs = trial.suggest_categorical("use_time_covs", [True, False])
+    lstm_dim = 220
+    dense_dim = 60
 
     data_loader = DataProcessor(
         file_path,
@@ -33,7 +35,7 @@ def objective(trial):
         end_date=(2023, 1, 17),
         # hour_range=(6, 20),
         group_freq=30,
-        n_input=n_input,
+        n_input=in_len,
         n_output=n_output,
         date_column='timestamp',
         scaler=sc,
@@ -42,7 +44,7 @@ def objective(trial):
     model = build_lstm_1(
         data_loader,
         epochs=100,
-        batch_size=batch_size,
+        batch_size=16,
         lstm_dim=lstm_dim,
         dense_dim=dense_dim)
 
@@ -53,14 +55,14 @@ def objective(trial):
 
     # Predict for the entire test set:
     # *******************************************************************************
-    prediction = PredictAndForecast(model[0], test, valid, n_input=n_input, n_output=n_output)
+    prediction = PredictAndForecast(model[0], test, valid, n_input=in_len, n_output=n_output)
     preds = prediction.get_predictions()
     actuals = prediction.updated_test()
     # preds = inverse_transform_prediction(prediction.get_predictions(), len(features_name), sc)
     # actuals = sc.inverse_transform(prediction.updated_test())
 
     evals = Evaluate(actuals, preds)
-    mape = round(evals.mape * 100, 2)
+    mape = round(evals.mape() * 100, 2)
 
     return mape if mape is not None else float("inf")
 
